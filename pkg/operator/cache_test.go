@@ -31,33 +31,19 @@ func configMapWithSecretData(name string) *corev1.ConfigMap {
 	}
 }
 
-// TestCacheTransform_KeepsStrippingConfigMapData guards the memory optimization:
-// the fix for the config-audit regression must not start caching ConfigMap
-// contents cluster-wide. Config-audit instead re-reads the contents of the
-// ConfigMaps it scans from the API server - see
-// (*configauditreport/controller.ResourceController).restoreConfigMapData, and
-// the envtest regression spec in tests/envtest.
-func TestCacheTransform_KeepsStrippingConfigMapData(t *testing.T) {
+// TestCacheTransform_StripsConfigMapData guards the memory optimization: no
+// ConfigMap contents are ever held in the shared informer cache, not even those
+// of the operator's own ConfigMaps. ConfigMap is listed in the manager's
+// client.CacheOptions.DisableFor, so every read returns a full object from the
+// API server anyway - see the envtest regression spec in tests/envtest.
+func TestCacheTransform_StripsConfigMapData(t *testing.T) {
 	tests := []struct {
 		name      string
 		configMap string
-		wantData  bool
 	}{
-		{
-			name:      "ordinary ConfigMap contents are dropped",
-			configMap: "kap-configmap-secret-test",
-			wantData:  false,
-		},
-		{
-			name:      "policies ConfigMap keeps its contents",
-			configMap: trivyoperator.PoliciesConfigMapName,
-			wantData:  true,
-		},
-		{
-			name:      "trivy config ConfigMap keeps its contents",
-			configMap: trivyoperator.TrivyConfigMapName,
-			wantData:  true,
-		},
+		{"ordinary ConfigMap", "kap-configmap-secret-test"},
+		{"policies ConfigMap", trivyoperator.PoliciesConfigMapName},
+		{"trivy config ConfigMap", trivyoperator.TrivyConfigMapName},
 	}
 
 	for _, tc := range tests {
@@ -68,13 +54,8 @@ func TestCacheTransform_KeepsStrippingConfigMapData(t *testing.T) {
 			got, ok := out.(*corev1.ConfigMap)
 			require.True(t, ok)
 
-			if tc.wantData {
-				assert.Equal(t, "SuperSecret123", got.Data["password"])
-				assert.Equal(t, []byte("binary-secret"), got.BinaryData["keystore.jks"])
-			} else {
-				assert.Nil(t, got.Data)
-				assert.Nil(t, got.BinaryData)
-			}
+			assert.Nil(t, got.Data)
+			assert.Nil(t, got.BinaryData)
 
 			// Identity is never stripped; the config-audit report is keyed on it.
 			assert.Equal(t, tc.configMap, got.Name)
@@ -118,61 +99,10 @@ func TestCacheTransform_LeavesOtherKindsAlone(t *testing.T) {
 // client-go shared informer - the machinery controller-runtime's cache is built
 // on - so that the cached representation, not just the function, is asserted.
 func TestCacheTransform_ThroughSharedInformer(t *testing.T) {
-	tests := []struct {
-		name      string
-		configMap string
-		wantData  bool
-	}{
-		{"ordinary ConfigMap", "kap-configmap-secret-test", false},
-		{"policies ConfigMap", trivyoperator.PoliciesConfigMapName, true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			clientset := fake.NewClientset(configMapWithSecretData(tc.configMap))
-
-			factory := informers.NewSharedInformerFactoryWithOptions(
-				clientset,
-				0,
-				informers.WithNamespace("default"),
-				informers.WithTransform(CacheTransform()),
-			)
-			informer := factory.Core().V1().ConfigMaps().Informer()
-
-			stop := make(chan struct{})
-			defer close(stop)
-			factory.Start(stop)
-
-			require.Eventually(t, informer.HasSynced, 10*time.Second, 10*time.Millisecond,
-				"informer did not sync")
-
-			obj, exists, err := informer.GetStore().GetByKey("default/" + tc.configMap)
-			require.NoError(t, err)
-			require.True(t, exists, "ConfigMap not found in informer store")
-
-			cached := obj.(*corev1.ConfigMap)
-			if tc.wantData {
-				assert.Equal(t, "SuperSecret123", cached.Data["password"])
-			} else {
-				assert.Nil(t, cached.Data)
-				assert.Nil(t, cached.BinaryData)
-			}
-		})
-	}
-}
-
-// TestCacheTransform_ReconcileDoesNotPolluteTheStore proves the invariant the
-// config-audit ConfigMap fix depends on: enriching the reconcile-local ConfigMap
-// with contents read from the API server cannot push those contents into the
-// shared informer store, so the memory optimization survives repeated
-// reconciles.
-//
-// See (*configauditreport/controller.ResourceController).restoreConfigMapData
-// and its unit tests for the production code path.
-func TestCacheTransform_ReconcileDoesNotPolluteTheStore(t *testing.T) {
 	const name = "kap-configmap-secret-test"
 
 	clientset := fake.NewClientset(configMapWithSecretData(name))
+
 	factory := informers.NewSharedInformerFactoryWithOptions(
 		clientset,
 		0,
@@ -188,41 +118,11 @@ func TestCacheTransform_ReconcileDoesNotPolluteTheStore(t *testing.T) {
 	require.Eventually(t, informer.HasSynced, 10*time.Second, 10*time.Millisecond,
 		"informer did not sync")
 
-	readStore := func() *corev1.ConfigMap {
-		obj, exists, err := informer.GetStore().GetByKey("default/" + name)
-		require.NoError(t, err)
-		require.True(t, exists)
-		return obj.(*corev1.ConfigMap)
-	}
+	obj, exists, err := informer.GetStore().GetByKey("default/" + name)
+	require.NoError(t, err)
+	require.True(t, exists, "ConfigMap not found in informer store")
 
-	require.Nil(t, readStore().Data, "precondition: the cache stores no ConfigMap data")
-
-	// live is what the API server returns; config-audit reads it through the
-	// manager's uncached APIReader.
-	live := configMapWithSecretData(name)
-
-	for i := range 3 {
-		// Mimic controller-runtime's CacheReader.Get: deep copy the stored object,
-		// then copy the struct into a freshly allocated object.
-		out := &corev1.ConfigMap{}
-		*out = *readStore().DeepCopy()
-
-		out.Data = live.Data
-		out.BinaryData = live.BinaryData
-
-		assert.Equal(t, "SuperSecret123", out.Data["password"],
-			"reconcile %d: the scanned object must carry the ConfigMap data", i)
-		assert.Nil(t, readStore().Data, "reconcile %d polluted the informer store", i)
-		assert.Nil(t, readStore().BinaryData, "reconcile %d polluted the informer store", i)
-	}
-
-	// Same guarantee with the deep copy skipped, i.e. as if the cache were
-	// configured with UnsafeDisableDeepCopy.
-	out := &corev1.ConfigMap{}
-	*out = *readStore()
-	out.Data = live.Data
-	out.BinaryData = live.BinaryData
-
-	assert.Nil(t, readStore().Data)
-	assert.Nil(t, readStore().BinaryData)
+	cached := obj.(*corev1.ConfigMap)
+	assert.Nil(t, cached.Data)
+	assert.Nil(t, cached.BinaryData)
 }

@@ -71,6 +71,10 @@ func Start(ctx context.Context, buildInfo trivyoperator.BuildInfo, operatorConfi
 				DisableFor: []client.Object{
 					&corev1.Secret{},
 					&corev1.ServiceAccount{},
+					// ConfigMap contents are stripped from the shared informer
+					// cache (see CacheTransform), so ConfigMap reads must go to
+					// the API server to return a full object.
+					&corev1.ConfigMap{},
 				},
 			},
 		},
@@ -298,7 +302,6 @@ func Start(ctx context.Context, buildInfo trivyoperator.BuildInfo, operatorConfi
 			ClusterVersion:   gitVersion,
 			CacheSyncTimeout: *operatorConfig.ControllerCacheSyncTimeout,
 			ChecksLoader:     checksLoader,
-			APIReader:        mgr.GetAPIReader(),
 		}).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("unable to setup resource controller: %w", err)
 		}

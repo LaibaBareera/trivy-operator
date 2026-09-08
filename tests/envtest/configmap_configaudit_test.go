@@ -20,9 +20,9 @@ import (
 // that reads ConfigMap data pass vacuously.
 //
 // The whole production path is exercised here: the object goes through the real
-// controller-runtime cache (with the operator's own transform installed in
-// suite_test.go), through the config-audit ResourceController, through
-// policy.Policies.Eval and into Rego.
+// controller-runtime cache and client (both configured in suite_test.go exactly
+// as the operator configures them), through the config-audit
+// ResourceController, through policy.Policies.Eval and into Rego.
 var _ = Describe("ConfigAudit on ConfigMap contents", func() {
 	const (
 		cmNamespace = "default"
@@ -67,14 +67,20 @@ var _ = Describe("ConfigAudit on ConfigMap contents", func() {
 
 		By("confirming the shared cache still strips the ConfigMap data")
 		// This is the memory optimization the operator relies on, and the reason
-		// config-audit has to read the contents from the API server. If this
-		// assertion ever fails the optimization has been dropped, and the
-		// regression this spec guards can no longer occur for the reason it did.
+		// ConfigMap is on the manager client's DisableFor list. If this assertion
+		// ever fails the optimization has been dropped.
 		cached := &corev1.ConfigMap{}
 		Eventually(func(g Gomega) {
-			g.Expect(cachedClient.Get(ctx, key, cached)).Should(Succeed())
+			g.Expect(cacheReader.Get(ctx, key, cached)).Should(Succeed())
 			g.Expect(cached.Data).Should(BeNil())
 		}, timeout, interval).Should(Succeed())
+
+		By("confirming the client the controllers use still returns the data")
+		// DisableFor sends ConfigMap reads to the API server, which is what makes
+		// the stripped cache harmless.
+		fromManager := &corev1.ConfigMap{}
+		Expect(managerReader.Get(ctx, key, fromManager)).Should(Succeed())
+		Expect(fromManager.Data).Should(HaveKeyWithValue("password", "SuperSecret123"))
 
 		By("waiting for the ConfigAuditReport")
 		report := &v1alpha1.ConfigAuditReport{}
@@ -92,13 +98,12 @@ var _ = Describe("ConfigAudit on ConfigMap contents", func() {
 			"the finding must name the offending ConfigMap key")
 
 		By("confirming the reconcile did not push the data into the shared cache")
-		// restoreConfigMapData enriches only the reconcile-local object, which
-		// controller-runtime's CacheReader hands out as a deep copy. The store
-		// must still hold a ConfigMap without contents, on this read and on
+		// The reconcile reads a full object from the API server; the informer
+		// store must still hold a ConfigMap without contents, on this read and on
 		// every later one, or the memory optimization has been defeated.
 		for range 2 {
 			afterReconcile := &corev1.ConfigMap{}
-			Expect(cachedClient.Get(ctx, key, afterReconcile)).Should(Succeed())
+			Expect(cacheReader.Get(ctx, key, afterReconcile)).Should(Succeed())
 			Expect(afterReconcile.Data).Should(BeNil(),
 				"the reconcile leaked ConfigMap data into the informer cache")
 			Expect(afterReconcile.BinaryData).Should(BeNil(),
@@ -119,52 +124,52 @@ var _ = Describe("ConfigAudit on ConfigMap contents", func() {
 
 			// ... while the cache still holds nothing.
 			afterUpdate := &corev1.ConfigMap{}
-			g.Expect(cachedClient.Get(ctx, key, afterUpdate)).Should(Succeed())
+			g.Expect(cacheReader.Get(ctx, key, afterUpdate)).Should(Succeed())
 			g.Expect(afterUpdate.Data).Should(BeNil())
 			g.Expect(afterUpdate.BinaryData).Should(BeNil())
 		}, timeout, interval).Should(Succeed())
 	})
 
-	It("should keep caching the contents of the operator's own ConfigMaps", func() {
+	It("should keep no ConfigMap contents in the cache, not even the operator's own", func() {
 		namespace := &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: "configmap-cache-regression"},
 		}
 		Expect(k8sClient.Create(ctx, namespace)).Should(Succeed())
 
-		cases := []struct {
-			name     string
-			wantData bool
-		}{
-			{name: trivyoperator.PoliciesConfigMapName, wantData: true},
-			{name: trivyoperator.TrivyConfigMapName, wantData: true},
-			{name: "some-application-config", wantData: false},
+		names := []string{
+			trivyoperator.PoliciesConfigMapName,
+			trivyoperator.TrivyConfigMapName,
+			"some-application-config",
 		}
 
-		for _, tc := range cases {
+		for _, name := range names {
 			configMap := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      tc.name,
+					Name:      name,
 					Namespace: namespace.Name,
 				},
 				Data:       map[string]string{"password": "SuperSecret123"},
 				BinaryData: map[string][]byte{"keystore.jks": []byte("binary-secret")},
 			}
 			Expect(k8sClient.Create(ctx, configMap)).Should(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, configMap)
+			})
 
 			key := client.ObjectKeyFromObject(configMap)
-			wantData := tc.wantData
 
 			cached := &corev1.ConfigMap{}
 			Eventually(func(g Gomega) {
-				g.Expect(cachedClient.Get(ctx, key, cached)).Should(Succeed())
-				if wantData {
-					g.Expect(cached.Data).Should(HaveKeyWithValue("password", "SuperSecret123"))
-					g.Expect(cached.BinaryData).Should(HaveKeyWithValue("keystore.jks", []byte("binary-secret")))
-				} else {
-					g.Expect(cached.Data).Should(BeNil())
-					g.Expect(cached.BinaryData).Should(BeNil())
-				}
-			}, timeout, interval).Should(Succeed(), "unexpected cache behaviour for ConfigMap %s", tc.name)
+				g.Expect(cacheReader.Get(ctx, key, cached)).Should(Succeed())
+				g.Expect(cached.Data).Should(BeNil())
+				g.Expect(cached.BinaryData).Should(BeNil())
+			}, timeout, interval).Should(Succeed(), "ConfigMap %s was cached with its contents", name)
+
+			// Every read the operator itself makes still sees the contents.
+			fromManager := &corev1.ConfigMap{}
+			Expect(managerReader.Get(ctx, key, fromManager)).Should(Succeed())
+			Expect(fromManager.Data).Should(HaveKeyWithValue("password", "SuperSecret123"), name)
+			Expect(fromManager.BinaryData).Should(HaveKeyWithValue("keystore.jks", []byte("binary-secret")), name)
 		}
 	})
 })

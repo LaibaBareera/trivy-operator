@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -45,12 +46,15 @@ import (
 var (
 	cfg       *rest.Config
 	k8sClient client.Client // You'll be using this client in your tests.
-	// cachedClient reads through the manager's shared informer cache, i.e. the
-	// same client the controllers use.
-	cachedClient client.Client
-	testEnv      *envtest.Environment
-	ctx          context.Context
-	cancel       context.CancelFunc
+	// cacheReader reads straight from the manager's shared informer cache,
+	// bypassing the manager client's DisableFor list. It exists so that specs
+	// can assert what the cache actually holds.
+	cacheReader client.Reader
+	// managerReader is the client the controllers use.
+	managerReader client.Reader
+	testEnv       *envtest.Environment
+	ctx           context.Context
+	cancel        context.CancelFunc
 )
 
 func TestAPIs(t *testing.T) {
@@ -89,17 +93,28 @@ var _ = BeforeSuite(func() {
 
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				// Mirror the operator's production client options, so that
+				// cache-related regressions - such as ConfigMap contents being
+				// stripped before config-audit reads them - are reproducible here.
+				DisableFor: []client.Object{
+					&corev1.Secret{},
+					&corev1.ServiceAccount{},
+					&corev1.ConfigMap{},
+				},
+			},
+		},
 		Cache: cache.Options{
-			// Use the same transform the operator installs in production, so that
-			// cache-related regressions - such as ConfigMap contents being
-			// stripped before config-audit reads them - are reproducible here.
+			// Likewise the production cache transform.
 			DefaultTransform: operator.CacheTransform(),
 		},
 		Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
 	})
 	Expect(err).ToNot(HaveOccurred())
 	managerClient := k8sManager.GetClient()
-	cachedClient = managerClient
+	managerReader = managerClient
+	cacheReader = k8sManager.GetCache()
 	compatibleObjectMapper := &kube.CompatibleObjectMapper{}
 	objectResolver := kube.NewObjectResolver(managerClient, compatibleObjectMapper)
 	Expect(err).ToNot(HaveOccurred())
@@ -200,7 +215,6 @@ var _ = BeforeSuite(func() {
 		InfraReadWriter: infraassessment.NewReadWriter(&objectResolver),
 		BuildInfo:       buildInfo,
 		ChecksLoader:    checksLoader,
-		APIReader:       k8sManager.GetAPIReader(),
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
