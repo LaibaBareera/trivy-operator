@@ -1,21 +1,21 @@
 # METADATA
-# title: "ConfigMap with secrets"
-# description: "Storing secrets in configMaps is unsafe."
+# title: "[envtest fixture] ConfigMap stores a secret"
+# description: "Test-only check. Fails when a ConfigMap's data looks like it stores a secret. It exists to prove that ConfigMap Data survives the informer cache transform and reaches Rego evaluation; it is not the upstream no-secrets-in-configmap check and must not be treated as one."
 # scope: package
 # schemas:
 # - input: schema["kubernetes"]
 # custom:
-#   id: KSV109
-#   avd_id: AVD-KSV-0109
+#   id: ENVTEST001
+#   avd_id: AVD-ENVTEST-0001
 #   severity: HIGH
-#   short_code: no-secrets-in-configmap
-#   recommended_action: "Remove password/secret from configMap data value."
+#   short_code: envtest-configmap-stores-secret
+#   recommended_action: "Nothing - this check exists only to exercise ConfigMap data in the envtest suite."
 #   input:
 #     selector:
 #     - type: kubernetes
 #       subtypes:
 #         - kind: configmap
-package builtin.kubernetes.KSV109
+package trivyoperator.kubernetes.ENVTEST001
 
 import data.lib.kubernetes
 

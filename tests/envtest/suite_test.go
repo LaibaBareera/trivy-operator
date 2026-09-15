@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -94,16 +93,11 @@ var _ = BeforeSuite(func() {
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
 		Client: client.Options{
-			Cache: &client.CacheOptions{
-				// Mirror the operator's production client options, so that
-				// cache-related regressions - such as ConfigMap contents being
-				// stripped before config-audit reads them - are reproducible here.
-				DisableFor: []client.Object{
-					&corev1.Secret{},
-					&corev1.ServiceAccount{},
-					&corev1.ConfigMap{},
-				},
-			},
+			// Use the operator's own client cache configuration rather than a
+			// copy of it, so that cache-related regressions - such as ConfigMap
+			// contents being stripped before config-audit reads them - are
+			// reproducible here and cannot drift from production.
+			Cache: operator.ClientCacheOptions(),
 		},
 		Cache: cache.Options{
 			// Likewise the production cache transform.

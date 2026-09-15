@@ -20,17 +20,25 @@ import (
 // that reads ConfigMap data pass vacuously.
 //
 // The whole production path is exercised here: the object goes through the real
-// controller-runtime cache and client (both configured in suite_test.go exactly
-// as the operator configures them), through the config-audit
-// ResourceController, through policy.Policies.Eval and into Rego.
+// controller-runtime cache and client (both configured in suite_test.go from
+// the operator's own operator.ClientCacheOptions and operator.CacheTransform),
+// through the config-audit ResourceController, through policy.Policies.Eval and
+// into Rego.
+//
+// The check driven here is the local fixture
+// testdata/content/.../general/configmap_with_secrets.rego, whose id is
+// deliberately ENVTEST001 in the trivyoperator namespace rather than any
+// upstream KSV id: this spec proves that ConfigMap Data reaches Rego, and makes
+// no claim about an upstream check's behaviour.
 var _ = Describe("ConfigAudit on ConfigMap contents", func() {
 	const (
 		cmNamespace = "default"
 		cmName      = "kap-configmap-secret-test"
 		reportName  = "configmap-" + cmName
-		checkID     = "KSV109"
-		timeout     = time.Second * 45
-		interval    = time.Millisecond * 250
+		// The local envtest-only check; see the fixture rego for why it is not a KSV id.
+		checkID  = "ENVTEST001"
+		timeout  = time.Second * 45
+		interval = time.Millisecond * 250
 	)
 
 	findCheck := func(checks []v1alpha1.Check, id string) *v1alpha1.Check {

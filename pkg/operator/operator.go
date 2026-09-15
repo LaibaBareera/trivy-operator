@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/bluele/gcache"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -67,16 +66,7 @@ func Start(ctx context.Context, buildInfo trivyoperator.BuildInfo, operatorConfi
 		Metrics:                metricsserver.Options{BindAddress: operatorConfig.MetricsBindAddress},
 		HealthProbeBindAddress: operatorConfig.HealthProbeBindAddress,
 		Client: client.Options{
-			Cache: &client.CacheOptions{
-				DisableFor: []client.Object{
-					&corev1.Secret{},
-					&corev1.ServiceAccount{},
-					// ConfigMap contents are stripped from the shared informer
-					// cache (see CacheTransform), so ConfigMap reads must go to
-					// the API server to return a full object.
-					&corev1.ConfigMap{},
-				},
-			},
+			Cache: ClientCacheOptions(),
 		},
 		Cache: cache.Options{
 			DefaultTransform: CacheTransform(),

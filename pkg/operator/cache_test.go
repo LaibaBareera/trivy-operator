@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,6 +14,39 @@ import (
 
 	"github.com/aquasecurity/trivy-operator/pkg/trivyoperator"
 )
+
+// TestClientCacheOptions pins the set of types whose reads bypass the informer
+// cache. ConfigMap must stay in the list for as long as CacheTransform strips
+// ConfigMap contents, or cached reads would hand back an object with no Data.
+func TestClientCacheOptions(t *testing.T) {
+	opts := ClientCacheOptions()
+	require.NotNil(t, opts)
+
+	got := make([]string, 0, len(opts.DisableFor))
+	for _, obj := range opts.DisableFor {
+		got = append(got, fmt.Sprintf("%T", obj))
+	}
+	assert.ElementsMatch(t, []string{"*v1.Secret", "*v1.ServiceAccount", "*v1.ConfigMap"}, got)
+}
+
+// TestClientCacheOptions_ReturnsFreshValue guards against the options - or the
+// slice inside them - being shared between the operator and the envtest suite,
+// where one caller mutating them would silently reconfigure the other.
+func TestClientCacheOptions_ReturnsFreshValue(t *testing.T) {
+	first := ClientCacheOptions()
+	second := ClientCacheOptions()
+
+	assert.NotSame(t, first, second)
+
+	first.DisableFor = first.DisableFor[:0]
+	first.DisableFor = append(first.DisableFor, &corev1.Pod{})
+
+	assert.Len(t, second.DisableFor, 3, "mutating one result must not affect another")
+	for _, obj := range second.DisableFor {
+		assert.NotEqual(t, "*v1.Pod", fmt.Sprintf("%T", obj),
+			"mutation leaked into a later call")
+	}
+}
 
 func configMapWithSecretData(name string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
